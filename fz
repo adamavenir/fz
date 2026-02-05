@@ -749,7 +749,7 @@ cmd_boards() {
     config=$(get_local_config)
     aliases=$(echo "$config" | jq -r '.aliases.boards // {}')
 
-    echo "${BOLD}Boards:${RESET}"
+    printf "${BOLD}Boards:${RESET}\n"
     while read -r line; do
         local id name
         id=$(echo "$line" | jq -r '.id')
@@ -760,9 +760,9 @@ cmd_boards() {
         alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
 
         if [[ -n "$alias_name" ]]; then
-            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name)${RESET}"
+            printf "  ${BRIGHT}%s${RESET} ${DIM}(%s)${RESET}\n" "$name" "$alias_name"
         else
-            echo "  ${BRIGHT}$name${RESET}"
+            printf "  ${BRIGHT}%s${RESET}\n" "$name"
         fi
     done < <(echo "$boards" | jq -c '.[]')
 
@@ -788,7 +788,7 @@ cmd_columns() {
     config=$(get_local_config)
     aliases=$(echo "$config" | jq -r '.aliases.columns // {}')
 
-    echo "${BOLD}Columns:${RESET}"
+    printf "${BOLD}Columns:${RESET}\n"
     while read -r line; do
         local id name
         id=$(echo "$line" | jq -r '.id')
@@ -799,9 +799,9 @@ cmd_columns() {
         alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
 
         if [[ -n "$alias_name" ]]; then
-            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name)${RESET}"
+            printf "  ${BRIGHT}%s${RESET} ${DIM}(%s)${RESET}\n" "$name" "$alias_name"
         else
-            echo "  ${BRIGHT}$name${RESET}"
+            printf "  ${BRIGHT}%s${RESET}\n" "$name"
         fi
     done < <(echo "$columns" | jq -c '.[]')
 
@@ -820,7 +820,7 @@ cmd_users() {
     config=$(get_local_config)
     aliases=$(echo "$config" | jq -r '.aliases.users // {}')
 
-    echo "${BOLD}Users:${RESET}"
+    printf "${BOLD}Users:${RESET}\n"
     while read -r line; do
         local id name role
         id=$(echo "$line" | jq -r '.id')
@@ -832,9 +832,9 @@ cmd_users() {
         alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
 
         if [[ -n "$alias_name" ]]; then
-            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name, $role)${RESET}"
+            printf "  ${BRIGHT}%s${RESET} ${DIM}(%s, %s)${RESET}\n" "$name" "$alias_name" "$role"
         else
-            echo "  ${BRIGHT}$name${RESET} ${DIM}($role)${RESET}"
+            printf "  ${BRIGHT}%s${RESET} ${DIM}(%s)${RESET}\n" "$name" "$role"
         fi
     done < <(echo "$users" | jq -c '.[]')
 
@@ -915,7 +915,7 @@ cmd_cards() {
     local card_count
     card_count=$(echo "$cards" | jq 'length')
     if [[ "$card_count" -eq 0 ]]; then
-        echo "${DIM}No cards found${RESET}"
+        printf "${DIM}No cards found${RESET}\n"
         maybe_refresh_metadata
         return
     fi
@@ -981,8 +981,8 @@ cmd_show() {
     tags=$(echo "$card" | jq -r '.tags // []')
     created_at=$(echo "$card" | jq -r '.created_at')
 
-    echo "${BOLD}#$card_number: $title${RESET}"
-    echo "${DIM}$board_name: $column_name${RESET}"
+    printf "${BOLD}#%s: %s${RESET}\n" "$card_number" "$title"
+    printf "${DIM}%s: %s${RESET}\n" "$board_name" "$column_name"
     echo
 
     # Tags
@@ -991,7 +991,7 @@ cmd_show() {
         while read -r tag; do
             [[ -n "$tag" ]] && tag_str="$tag_str #$tag"
         done < <(echo "$tags" | jq -r '.[]')
-        echo "${DIM}$tag_str${RESET}"
+        printf "${DIM}%s${RESET}\n" "$tag_str"
         echo
     fi
 
@@ -1005,7 +1005,7 @@ cmd_show() {
     local assignees
     assignees=$(echo "$card" | jq -r '.assignees // []')
     if [[ "$assignees" != "[]" ]]; then
-        echo "${DIM}Assigned to:${RESET}"
+        printf "${DIM}Assigned to:${RESET}\n"
         echo "$assignees" | jq -r '.[] | "  \(.name)"'
         echo
     fi
@@ -1015,7 +1015,7 @@ cmd_show() {
     comments=$(api_get "/$account/cards/$card_number/comments")
 
     if [[ $(echo "$comments" | jq 'length') -gt 0 ]]; then
-        echo "${BOLD}Comments:${RESET}"
+        printf "${BOLD}Comments:${RESET}\n"
         echo
         while read -r comment; do
             local creator_name body_text created_at
@@ -1023,7 +1023,7 @@ cmd_show() {
             body_text=$(echo "$comment" | jq -r '.body.plain_text')
             created_at=$(echo "$comment" | jq -r '.created_at')
 
-            echo "${DIM}$creator_name ($created_at):${RESET}"
+            printf "${DIM}%s (%s):${RESET}\n" "$creator_name" "$created_at"
             echo "$body_text"
             echo
         done < <(echo "$comments" | jq -c '.[]')
