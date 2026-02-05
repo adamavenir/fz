@@ -480,7 +480,7 @@ format_card() {
         printf "%s${BRIGHT}%s${RESET}\n" "$indent" "${title_lines[$i]}"
     done
 
-    # Tags (dim, indented)
+    # Tags (dim, flush with title)
     if [[ -n "$tags" && "$tags" != "null" && "$tags" != "[]" ]]; then
         local tag_str=""
         while read -r tag; do
@@ -488,20 +488,14 @@ format_card() {
         done < <(echo "$tags" | jq -r '.[]' 2>/dev/null || true)
 
         if [[ -n "$tag_str" ]]; then
-            printf "%s${DIM}%s${RESET}\n" "$indent" "$tag_str"
+            printf "%s${DIM}%s${RESET}\n" "$indent" "${tag_str# }"
         fi
     fi
 }
 
 # Print column separator
 print_separator() {
-    local term_width
-    term_width=$(tput cols 2>/dev/null || echo 80)
-    local sep=""
-    for ((i=0; i<term_width/2; i++)); do
-        sep="$sep- "
-    done
-    printf "\n${DIM}%s${RESET}\n\n" "$sep"
+    printf "\n${DIM}- - - -${RESET}\n\n"
 }
 
 #
