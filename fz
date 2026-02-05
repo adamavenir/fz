@@ -48,7 +48,7 @@ get_local_config_file() {
 
 
 # Reserved words (can't be filter names)
-RESERVED_WORDS="cards show add edit move mb nn close open comment assign tag whoami boards columns users login init save board column user help maybe triage notnow later version"
+RESERVED_WORDS="cards show add edit move mb nn close open comment assign tag whoami boards cols columns col users login init save board user help maybe triage notnow later version"
 
 #
 # Utilities
@@ -797,7 +797,7 @@ cmd_boards() {
     maybe_refresh_metadata
 }
 
-cmd_columns() {
+cmd_cols() {
     require_jq
     local account board_id
     account=$(get_account)
@@ -1362,11 +1362,11 @@ cmd_board_link() {
     echo "Linked to board: $board_name"
 }
 
-cmd_column_alias() {
+cmd_col_alias() {
     require_jq
 
     if [[ $# -lt 2 ]]; then
-        die "Usage: fz column --alias <name> <column>"
+        die "Usage: fz col --alias <name> <column>"
     fi
 
     local alias_name="$1"
@@ -1509,7 +1509,7 @@ Setup:
 
 Aliases:
   fz board --alias <name>              Alias current board
-  fz column --alias <name> <column>    Alias a column
+  fz col --alias <name> <column>       Alias a column
   fz user --alias <name> <user>        Alias a user
 
 Saved filters:
@@ -1545,7 +1545,7 @@ Collaboration:
 Info:
   fz whoami                  Show identity/accounts
   fz boards                  List boards
-  fz columns [board]         List columns
+  fz cols [board]            List columns
   fz users                   List users
   fz help                    Show this help
   fz version                 Show version
@@ -1613,7 +1613,7 @@ main() {
         init) cmd_init "$@" ;;
         whoami) cmd_whoami "$@" ;;
         boards) cmd_boards "$@" ;;
-        columns) cmd_columns "$@" ;;
+        cols|columns) cmd_cols "$@" ;;
         users) cmd_users "$@" ;;
         cards) cmd_cards "$@" ;;
         show) cmd_show "$@" ;;
@@ -1637,12 +1637,12 @@ main() {
                 cmd_boards "$@"
             fi
             ;;
-        column)
+        col|column)
             if [[ "${1:-}" == "--alias" ]]; then
                 shift
-                cmd_column_alias "$@"
+                cmd_col_alias "$@"
             else
-                cmd_columns "$@"
+                cmd_cols "$@"
             fi
             ;;
         user)
