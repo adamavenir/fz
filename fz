@@ -1338,18 +1338,24 @@ cmd_board_link() {
     local account
     account=$(get_account)
 
-    # Resolve board (fuzzy match)
-    local board_id
-    board_id=$(resolve_board_alias "$board_input")
+    # Fetch all boards and fuzzy match
+    local boards
+    boards=$(api_get "/$account/boards")
 
-    # Verify board exists by fetching it
-    local board
-    if ! board=$(api_get "/$account/boards/$board_id" 2>/dev/null); then
+    # Try exact match first
+    local board_id board_name
+    board_id=$(echo "$boards" | jq -r --arg n "$board_input" '.[] | select(.name == $n) | .id' | head -1)
+
+    # Try case-insensitive partial match
+    if [[ -z "$board_id" ]]; then
+        board_id=$(echo "$boards" | jq -r --arg n "$board_input" '.[] | select(.name | ascii_downcase | contains($n | ascii_downcase)) | .id' | head -1)
+    fi
+
+    if [[ -z "$board_id" ]]; then
         die "Board '$board_input' not found"
     fi
 
-    local board_name
-    board_name=$(echo "$board" | jq -r '.name')
+    board_name=$(echo "$boards" | jq -r --arg id "$board_id" '.[] | select(.id == $id) | .name')
 
     # Create or update local config
     local config
