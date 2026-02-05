@@ -1,6 +1,6 @@
 # fz
 
-A minimal CLI for [Fizzy](https://fizzy.do), the kanban tool by 37signals.
+A minimal CLI for [Fizzy](https://app.fizzy.do), the kanban tool by 37signals.
 
 ## Install
 
@@ -105,7 +105,7 @@ fz backlog
 Config lookup order:
 1. `.fz/config.json` (repo-specific)
 2. `~/.config/fz/*` (global)
-3. Default URL: `https://fizzy.do`
+3. Default URL: `https://app.fizzy.do`
 
 ## Output
 
