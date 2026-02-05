@@ -554,22 +554,40 @@ cmd_login() {
     echo "$token" > "$GLOBAL_AUTH_FILE"
     chmod 600 "$GLOBAL_AUTH_FILE"
 
-    # Save URL to global config (only if non-default)
-    if [[ "$url" != "https://app.fizzy.do" ]]; then
-        if [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
-            local config
-            config=$(cat "$GLOBAL_CONFIG_FILE")
-            config=$(echo "$config" | jq --arg url "$url" '.url = $url')
-            echo "$config" > "$GLOBAL_CONFIG_FILE"
-        else
-            echo "{\"url\": \"$url\"}" > "$GLOBAL_CONFIG_FILE"
-        fi
+    # Parse accounts from identity
+    local accounts account_count
+    accounts=$(echo "$identity" | jq -r '.accounts')
+    account_count=$(echo "$accounts" | jq 'length')
+
+    if [[ "$account_count" -eq 0 ]]; then
+        die "No accounts found for this token"
     fi
 
-    echo "Logged in successfully!"
-    echo
-    echo "Accounts:"
-    echo "$identity" | jq -r '.accounts[] | "  \(.name) (\(.slug))"'
+    # Select default account
+    local account_slug account_name
+    if [[ "$account_count" -eq 1 ]]; then
+        account_slug=$(echo "$accounts" | jq -r '.[0].slug' | tr -d '/')
+        account_name=$(echo "$accounts" | jq -r '.[0].name')
+        echo "Logged in to: $account_name"
+    else
+        echo "Logged in! Select default account:"
+        echo "$accounts" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)"'
+        read -rp "> " choice
+        account_slug=$(echo "$accounts" | jq -r ".[$((choice - 1))].slug" | tr -d '/')
+        account_name=$(echo "$accounts" | jq -r ".[$((choice - 1))].name")
+        echo "Using: $account_name"
+    fi
+
+    # Save to global config
+    local config='{}'
+    if [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
+        config=$(cat "$GLOBAL_CONFIG_FILE")
+    fi
+    config=$(echo "$config" | jq --arg account "$account_slug" '.account = $account')
+    if [[ "$url" != "https://app.fizzy.do" ]]; then
+        config=$(echo "$config" | jq --arg url "$url" '.url = $url')
+    fi
+    echo "$config" > "$GLOBAL_CONFIG_FILE"
 }
 
 cmd_init() {
