@@ -1,0 +1,1536 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# fz - fizzy kanban cli
+# Minimal, focused CLI for Fizzy project management
+
+VERSION="0.1.0"
+
+# Colors (respect NO_COLOR)
+if [[ -z "${NO_COLOR:-}" ]] && [[ -t 1 ]]; then
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    BRIGHT='\033[97m'
+    RESET='\033[0m'
+else
+    BOLD='' DIM='' BRIGHT='' RESET=''
+fi
+
+# Config paths
+GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fz"
+GLOBAL_AUTH_FILE="$GLOBAL_CONFIG_DIR/auth"
+GLOBAL_CONFIG_FILE="$GLOBAL_CONFIG_DIR/config.json"
+LOCAL_CONFIG_DIR=".fz"
+LOCAL_CONFIG_FILE="$LOCAL_CONFIG_DIR/config.json"
+
+# Reserved words (can't be filter names)
+RESERVED_WORDS="cards show add edit move mb nn close open comment assign tag whoami boards columns users login init save board column user help maybe triage notnow later version"
+
+#
+# Utilities
+#
+
+die() { echo "error: $*" >&2; exit 1; }
+
+is_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+is_reserved() {
+    local word="$1"
+    for reserved in $RESERVED_WORDS; do
+        [[ "$word" == "$reserved" ]] && return 0
+    done
+    return 1
+}
+
+# Check if jq is available
+require_jq() {
+    command -v jq &>/dev/null || die "jq is required. Install it with: brew install jq"
+}
+
+# Check if curl is available
+require_curl() {
+    command -v curl &>/dev/null || die "curl is required"
+}
+
+#
+# Config management
+#
+
+ensure_global_config_dir() {
+    mkdir -p "$GLOBAL_CONFIG_DIR"
+}
+
+get_auth_token() {
+    # Check override first (used during init)
+    if [[ -n "${FZ_TOKEN_OVERRIDE:-}" ]]; then
+        echo "$FZ_TOKEN_OVERRIDE"
+        return
+    fi
+    # Check local config (repo-specific)
+    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+        local token
+        token=$(jq -r '.token // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+        if [[ -n "$token" ]]; then
+            echo "$token"
+            return
+        fi
+    fi
+    # Fall back to global auth file
+    if [[ -f "$GLOBAL_AUTH_FILE" ]]; then
+        cat "$GLOBAL_AUTH_FILE"
+    else
+        die "Not logged in. Run: fz login"
+    fi
+}
+
+get_base_url() {
+    # Check override first (used during init)
+    if [[ -n "${FZ_URL_OVERRIDE:-}" ]]; then
+        echo "$FZ_URL_OVERRIDE"
+        return
+    fi
+    local url=""
+    # Check local config first
+    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+        url=$(jq -r '.url // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+    fi
+    # Fall back to global config
+    if [[ -z "$url" ]] && [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
+        url=$(jq -r '.url // empty' "$GLOBAL_CONFIG_FILE" 2>/dev/null || true)
+    fi
+    # Default to production
+    echo "${url:-https://fizzy.do}"
+}
+
+get_account() {
+    local account=""
+    # Check local config first
+    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+        account=$(jq -r '.account // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+    fi
+    # Fall back to global config
+    if [[ -z "$account" ]] && [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
+        account=$(jq -r '.account // empty' "$GLOBAL_CONFIG_FILE" 2>/dev/null || true)
+    fi
+    [[ -z "$account" ]] && die "No account configured. Run: fz init"
+    echo "$account"
+}
+
+get_board() {
+    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+        jq -r '.board // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true
+    fi
+}
+
+get_local_config() {
+    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+        cat "$LOCAL_CONFIG_FILE"
+    else
+        echo '{}'
+    fi
+}
+
+save_local_config() {
+    local config="$1"
+    mkdir -p "$LOCAL_CONFIG_DIR"
+    echo "$config" > "$LOCAL_CONFIG_FILE"
+}
+
+#
+# Alias resolution
+#
+
+resolve_board_alias() {
+    local input="$1"
+    local config
+    config=$(get_local_config)
+
+    # Try alias first
+    local resolved
+    resolved=$(echo "$config" | jq -r --arg k "$input" '.aliases.boards[$k] // empty' 2>/dev/null || true)
+
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Try fuzzy match on cached boards
+    local boards
+    boards=$(echo "$config" | jq -r '.cache.boards // []' 2>/dev/null || echo '[]')
+
+    # Exact name match first
+    resolved=$(echo "$boards" | jq -r --arg n "$input" '.[] | select(.name == $n) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Case-insensitive partial match
+    resolved=$(echo "$boards" | jq -r --arg n "$input" '.[] | select(.name | ascii_downcase | contains($n | ascii_downcase)) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Return input as-is (might be an ID)
+    echo "$input"
+}
+
+resolve_column_alias() {
+    local input="$1"
+    local board_id="${2:-}"
+    local config
+    config=$(get_local_config)
+
+    # Try alias first
+    local resolved
+    resolved=$(echo "$config" | jq -r --arg k "$input" '.aliases.columns[$k] // empty' 2>/dev/null || true)
+
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Try fuzzy match on cached columns
+    local columns
+    columns=$(echo "$config" | jq -r '.cache.columns // []' 2>/dev/null || echo '[]')
+
+    # Exact name match first
+    resolved=$(echo "$columns" | jq -r --arg n "$input" '.[] | select(.name == $n) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Case-insensitive partial match
+    resolved=$(echo "$columns" | jq -r --arg n "$input" '.[] | select(.name | ascii_downcase | contains($n | ascii_downcase)) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Return input as-is
+    echo "$input"
+}
+
+resolve_user_alias() {
+    local input="$1"
+    local config
+    config=$(get_local_config)
+
+    # Handle "me"
+    if [[ "$input" == "me" ]]; then
+        local my_id
+        my_id=$(echo "$config" | jq -r '.my_user_id // empty' 2>/dev/null || true)
+        if [[ -n "$my_id" ]]; then
+            echo "$my_id"
+            return
+        fi
+    fi
+
+    # Try alias first
+    local resolved
+    resolved=$(echo "$config" | jq -r --arg k "$input" '.aliases.users[$k] // empty' 2>/dev/null || true)
+
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Try fuzzy match on cached users
+    local users
+    users=$(echo "$config" | jq -r '.cache.users // []' 2>/dev/null || echo '[]')
+
+    # Exact name match first
+    resolved=$(echo "$users" | jq -r --arg n "$input" '.[] | select(.name == $n) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Case-insensitive partial match on name
+    resolved=$(echo "$users" | jq -r --arg n "$input" '.[] | select(.name | ascii_downcase | contains($n | ascii_downcase)) | .id' 2>/dev/null | head -1 || true)
+    if [[ -n "$resolved" ]]; then
+        echo "$resolved"
+        return
+    fi
+
+    # Return input as-is
+    echo "$input"
+}
+
+#
+# API helpers
+#
+
+api_get() {
+    local path="$1"
+    local token base_url
+    token=$(get_auth_token)
+    base_url=$(get_base_url)
+
+    curl -sS -f \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        "${base_url}${path}"
+}
+
+api_post() {
+    local path="$1"
+    local data="${2:-}"
+    local token base_url
+    token=$(get_auth_token)
+    base_url=$(get_base_url)
+
+    if [[ -n "$data" ]]; then
+        curl -sS -f \
+            -X POST \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d "$data" \
+            "${base_url}${path}"
+    else
+        curl -sS -f \
+            -X POST \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/json" \
+            "${base_url}${path}"
+    fi
+}
+
+api_put() {
+    local path="$1"
+    local data="$2"
+    local token base_url
+    token=$(get_auth_token)
+    base_url=$(get_base_url)
+
+    curl -sS -f \
+        -X PUT \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d "$data" \
+        "${base_url}${path}"
+}
+
+api_delete() {
+    local path="$1"
+    local token base_url
+    token=$(get_auth_token)
+    base_url=$(get_base_url)
+
+    curl -sS -f \
+        -X DELETE \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        "${base_url}${path}"
+}
+
+#
+# Metadata refresh (lazy, background)
+#
+
+should_refresh_metadata() {
+    local config
+    config=$(get_local_config)
+
+    local updated_at ttl_minutes
+    updated_at=$(echo "$config" | jq -r '.metadata_updated_at // empty' 2>/dev/null || true)
+    ttl_minutes=$(echo "$config" | jq -r '.metadata_ttl_minutes // 60' 2>/dev/null || echo "60")
+
+    if [[ -z "$updated_at" ]]; then
+        return 0  # Never updated, should refresh
+    fi
+
+    # Check if stale (portable date parsing)
+    local now updated_ts ttl_seconds
+    now=$(date +%s)
+    # Try GNU date first, then BSD date
+    if updated_ts=$(date -d "$updated_at" +%s 2>/dev/null); then
+        : # GNU date worked
+    elif updated_ts=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$updated_at" +%s 2>/dev/null); then
+        : # BSD date worked
+    else
+        updated_ts=0  # Fallback: treat as stale
+    fi
+    ttl_seconds=$((ttl_minutes * 60))
+
+    [[ $((now - updated_ts)) -gt $ttl_seconds ]]
+}
+
+refresh_metadata() {
+    [[ ! -f "$LOCAL_CONFIG_FILE" ]] && return 0
+
+    local config account board_id
+    config=$(get_local_config)
+    account=$(jq -r '.account // empty' <<< "$config")
+    board_id=$(jq -r '.board // empty' <<< "$config")
+
+    [[ -z "$account" ]] && return 0
+
+    # Fetch boards
+    local boards
+    boards=$(api_get "/$account/boards" 2>/dev/null || echo '[]')
+
+    # Fetch columns for current board
+    local columns='[]'
+    if [[ -n "$board_id" ]]; then
+        columns=$(api_get "/$account/boards/$board_id/columns" 2>/dev/null || echo '[]')
+    fi
+
+    # Fetch users
+    local users
+    users=$(api_get "/$account/users" 2>/dev/null || echo '[]')
+
+    # Update config
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    config=$(echo "$config" | jq \
+        --argjson boards "$boards" \
+        --argjson columns "$columns" \
+        --argjson users "$users" \
+        --arg now "$now" \
+        '.cache.boards = $boards | .cache.columns = $columns | .cache.users = $users | .metadata_updated_at = $now')
+
+    save_local_config "$config"
+}
+
+maybe_refresh_metadata() {
+    if should_refresh_metadata; then
+        # Background refresh
+        ( refresh_metadata & ) 2>/dev/null
+    fi
+}
+
+#
+# Output formatting
+#
+
+# Word wrap text to width, returns array of lines
+wrap_text() {
+    local text="$1"
+    local width="$2"
+
+    local current_line=""
+    local lines=()
+
+    for word in $text; do
+        if [[ -z "$current_line" ]]; then
+            current_line="$word"
+        elif [[ $((${#current_line} + 1 + ${#word})) -le $width ]]; then
+            current_line="$current_line $word"
+        else
+            lines+=("$current_line")
+            current_line="$word"
+        fi
+    done
+
+    [[ -n "$current_line" ]] && lines+=("$current_line")
+
+    printf '%s\n' "${lines[@]}"
+}
+
+# Format a card for list output
+format_card() {
+    local number="$1"
+    local title="$2"
+    local tags="$3"
+    local max_num_width="${4:-4}"
+
+    local term_width
+    term_width=$(tput cols 2>/dev/null || echo 80)
+    local title_width=$((term_width - max_num_width - 2))
+    local indent
+    indent=$(printf "%$((max_num_width + 1))s" "")
+
+    # Wrap the title
+    local title_lines=()
+    while IFS= read -r line; do
+        title_lines+=("$line")
+    done < <(wrap_text "$title" "$title_width")
+
+    # First line: Number (right-aligned) + Title (bright)
+    printf "%${max_num_width}s ${BRIGHT}%s${RESET}\n" "$number" "${title_lines[0]:-}"
+
+    # Continuation lines for title (indented)
+    local i
+    for ((i=1; i<${#title_lines[@]}; i++)); do
+        printf "%s${BRIGHT}%s${RESET}\n" "$indent" "${title_lines[$i]}"
+    done
+
+    # Tags (dim, indented)
+    if [[ -n "$tags" && "$tags" != "null" && "$tags" != "[]" ]]; then
+        local tag_str=""
+        while read -r tag; do
+            [[ -n "$tag" ]] && tag_str="$tag_str #$tag"
+        done < <(echo "$tags" | jq -r '.[]' 2>/dev/null || true)
+
+        if [[ -n "$tag_str" ]]; then
+            printf "%s${DIM}%s${RESET}\n" "$indent" "$tag_str"
+        fi
+    fi
+}
+
+# Print column separator
+print_separator() {
+    local term_width
+    term_width=$(tput cols 2>/dev/null || echo 80)
+    local sep=""
+    for ((i=0; i<term_width/2; i++)); do
+        sep="$sep- "
+    done
+    printf "\n${DIM}%s${RESET}\n\n" "$sep"
+}
+
+#
+# Commands
+#
+
+cmd_login() {
+    require_curl
+    ensure_global_config_dir
+
+    local token="" url=""
+
+    # Parse args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --url=*) url="${1#--url=}"; shift ;;
+            --url) shift; url="$1"; shift ;;
+            --token=*) token="${1#--token=}"; shift ;;
+            --token) shift; token="$1"; shift ;;
+            *) token="$1"; shift ;;
+        esac
+    done
+
+    # Prompt for token if not provided
+    if [[ -z "$token" ]]; then
+        echo "Enter your Fizzy personal access token:"
+        echo "(Generate one at: Profile → Personal access tokens)"
+        read -rs token
+        echo
+    fi
+
+    if [[ -z "$token" ]]; then
+        die "Token cannot be empty"
+    fi
+
+    # Use provided URL, env var, or default
+    url="${url:-${FIZZY_URL:-https://fizzy.do}}"
+
+    # Verify token works
+    echo "Verifying token..."
+    local identity
+    if ! identity=$(curl -sS -f \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        "${url}/my/identity" 2>&1); then
+        die "Invalid token or cannot connect to $url"
+    fi
+
+    # Save token
+    echo "$token" > "$GLOBAL_AUTH_FILE"
+    chmod 600 "$GLOBAL_AUTH_FILE"
+
+    # Save URL to global config (only if non-default)
+    if [[ "$url" != "https://fizzy.do" ]]; then
+        if [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
+            local config
+            config=$(cat "$GLOBAL_CONFIG_FILE")
+            config=$(echo "$config" | jq --arg url "$url" '.url = $url')
+            echo "$config" > "$GLOBAL_CONFIG_FILE"
+        else
+            echo "{\"url\": \"$url\"}" > "$GLOBAL_CONFIG_FILE"
+        fi
+    fi
+
+    echo "Logged in successfully!"
+    echo
+    echo "Accounts:"
+    echo "$identity" | jq -r '.accounts[] | "  \(.name) (\(.slug))"'
+}
+
+cmd_init() {
+    require_jq
+    require_curl
+
+    local global=false url="" token=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --global) global=true; shift ;;
+            --url=*) url="${1#--url=}"; shift ;;
+            --url) shift; url="$1"; shift ;;
+            --token=*) token="${1#--token=}"; shift ;;
+            --token) shift; token="$1"; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    # Set overrides for API calls during init
+    [[ -n "$token" ]] && FZ_TOKEN_OVERRIDE="$token"
+    [[ -n "$url" ]] && FZ_URL_OVERRIDE="$url"
+
+    # Get accounts
+    local identity
+    identity=$(api_get "/my/identity")
+
+    local accounts
+    accounts=$(echo "$identity" | jq -r '.accounts')
+    local account_count
+    account_count=$(echo "$accounts" | jq 'length')
+
+    if [[ "$account_count" -eq 0 ]]; then
+        die "No accounts found"
+    fi
+
+    local account_slug account_name
+    if [[ "$account_count" -eq 1 ]]; then
+        account_slug=$(echo "$accounts" | jq -r '.[0].slug' | tr -d '/')
+        account_name=$(echo "$accounts" | jq -r '.[0].name')
+        echo "Using account: $account_name"
+    else
+        echo "Select account:"
+        echo "$accounts" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)"'
+        read -rp "> " choice
+        account_slug=$(echo "$accounts" | jq -r ".[$((choice - 1))].slug" | tr -d '/')
+        account_name=$(echo "$accounts" | jq -r ".[$((choice - 1))].name")
+    fi
+
+    # Get my user ID for this account
+    local my_user_id
+    my_user_id=$(echo "$accounts" | jq -r --arg slug "/$account_slug" '.[] | select(.slug == $slug) | .user.id')
+
+    if $global; then
+        ensure_global_config_dir
+        local config='{}'
+        if [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
+            config=$(cat "$GLOBAL_CONFIG_FILE")
+        fi
+        config=$(echo "$config" | jq --arg account "$account_slug" '.account = $account')
+        echo "$config" > "$GLOBAL_CONFIG_FILE"
+        echo "Global config saved to $GLOBAL_CONFIG_FILE"
+        return
+    fi
+
+    # Get boards
+    local boards
+    boards=$(api_get "/$account_slug/boards")
+    local board_count
+    board_count=$(echo "$boards" | jq 'length')
+
+    if [[ "$board_count" -eq 0 ]]; then
+        die "No boards found in $account_name"
+    fi
+
+    local board_id board_name
+    if [[ "$board_count" -eq 1 ]]; then
+        board_id=$(echo "$boards" | jq -r '.[0].id')
+        board_name=$(echo "$boards" | jq -r '.[0].name')
+        echo "Using board: $board_name"
+    else
+        echo "Select board:"
+        echo "$boards" | jq -r 'to_entries[] | "  \(.key + 1)) \(.value.name)"'
+        read -rp "> " choice
+        board_id=$(echo "$boards" | jq -r ".[$((choice - 1))].id")
+        board_name=$(echo "$boards" | jq -r ".[$((choice - 1))].name")
+    fi
+
+    # Get columns for this board
+    local columns
+    columns=$(api_get "/$account_slug/boards/$board_id/columns")
+
+    # Get users
+    local users
+    users=$(api_get "/$account_slug/users")
+
+    # Create config
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local config
+    config=$(jq -n \
+        --arg account "$account_slug" \
+        --arg board "$board_id" \
+        --arg my_user_id "$my_user_id" \
+        --arg now "$now" \
+        --argjson boards "$boards" \
+        --argjson columns "$columns" \
+        --argjson users "$users" \
+        '{
+            account: $account,
+            board: $board,
+            my_user_id: $my_user_id,
+            metadata_ttl_minutes: 60,
+            metadata_updated_at: $now,
+            aliases: { boards: {}, columns: {}, users: {} },
+            filters: {},
+            cache: { boards: $boards, columns: $columns, users: $users }
+        }')
+
+    # Add token/url to local config if provided
+    if [[ -n "$token" ]]; then
+        config=$(echo "$config" | jq --arg token "$token" '.token = $token')
+    fi
+    if [[ -n "$url" ]]; then
+        config=$(echo "$config" | jq --arg url "$url" '.url = $url')
+    fi
+
+    mkdir -p "$LOCAL_CONFIG_DIR"
+    echo "$config" > "$LOCAL_CONFIG_FILE"
+
+    echo
+    echo "Initialized .fz/config.json"
+    echo "  Account: $account_name ($account_slug)"
+    echo "  Board: $board_name"
+    echo
+    echo "Add to .gitignore:"
+    echo "  echo '.fz/' >> .gitignore"
+}
+
+cmd_whoami() {
+    require_jq
+    local identity
+    identity=$(api_get "/my/identity")
+
+    echo "Accounts:"
+    echo "$identity" | jq -r '.accounts[] | "  \(.name) (\(.slug))\n    User: \(.user.name) (\(.user.role))"'
+}
+
+cmd_boards() {
+    require_jq
+    local account
+    account=$(get_account)
+
+    local boards
+    boards=$(api_get "/$account/boards")
+
+    local config aliases
+    config=$(get_local_config)
+    aliases=$(echo "$config" | jq -r '.aliases.boards // {}')
+
+    echo "${BOLD}Boards:${RESET}"
+    while read -r line; do
+        local id name
+        id=$(echo "$line" | jq -r '.id')
+        name=$(echo "$line" | jq -r '.name')
+
+        # Check for alias
+        local alias_name=""
+        alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
+
+        if [[ -n "$alias_name" ]]; then
+            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name)${RESET}"
+        else
+            echo "  ${BRIGHT}$name${RESET}"
+        fi
+    done < <(echo "$boards" | jq -c '.[]')
+
+    maybe_refresh_metadata
+}
+
+cmd_columns() {
+    require_jq
+    local account board_id
+    account=$(get_account)
+
+    if [[ $# -gt 0 ]]; then
+        board_id=$(resolve_board_alias "$1")
+    else
+        board_id=$(get_board)
+        [[ -z "$board_id" ]] && die "No board specified and no default board. Run: fz init"
+    fi
+
+    local columns
+    columns=$(api_get "/$account/boards/$board_id/columns")
+
+    local config aliases
+    config=$(get_local_config)
+    aliases=$(echo "$config" | jq -r '.aliases.columns // {}')
+
+    echo "${BOLD}Columns:${RESET}"
+    while read -r line; do
+        local id name
+        id=$(echo "$line" | jq -r '.id')
+        name=$(echo "$line" | jq -r '.name')
+
+        # Check for alias
+        local alias_name=""
+        alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
+
+        if [[ -n "$alias_name" ]]; then
+            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name)${RESET}"
+        else
+            echo "  ${BRIGHT}$name${RESET}"
+        fi
+    done < <(echo "$columns" | jq -c '.[]')
+
+    maybe_refresh_metadata
+}
+
+cmd_users() {
+    require_jq
+    local account
+    account=$(get_account)
+
+    local users
+    users=$(api_get "/$account/users")
+
+    local config aliases
+    config=$(get_local_config)
+    aliases=$(echo "$config" | jq -r '.aliases.users // {}')
+
+    echo "${BOLD}Users:${RESET}"
+    while read -r line; do
+        local id name role
+        id=$(echo "$line" | jq -r '.id')
+        name=$(echo "$line" | jq -r '.name')
+        role=$(echo "$line" | jq -r '.role')
+
+        # Check for alias
+        local alias_name=""
+        alias_name=$(echo "$aliases" | jq -r --arg id "$id" 'to_entries[] | select(.value == $id) | .key' 2>/dev/null | head -1 || true)
+
+        if [[ -n "$alias_name" ]]; then
+            echo "  ${BRIGHT}$name${RESET} ${DIM}($alias_name, $role)${RESET}"
+        else
+            echo "  ${BRIGHT}$name${RESET} ${DIM}($role)${RESET}"
+        fi
+    done < <(echo "$users" | jq -c '.[]')
+
+    maybe_refresh_metadata
+}
+
+cmd_cards() {
+    require_jq
+    local account board_id
+    account=$(get_account)
+
+    local filter_board="" filter_tag="" filter_assignee="" filter_status="" filter_search=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --board=*) filter_board="${1#--board=}"; shift ;;
+            --board) shift; filter_board="$1"; shift ;;
+            --tag=*) filter_tag="${1#--tag=}"; shift ;;
+            --tag) shift; filter_tag="$1"; shift ;;
+            --assignee=*) filter_assignee="${1#--assignee=}"; shift ;;
+            --assignee) shift; filter_assignee="$1"; shift ;;
+            --status=*) filter_status="${1#--status=}"; shift ;;
+            --status) shift; filter_status="$1"; shift ;;
+            --search=*) filter_search="${1#--search=}"; shift ;;
+            --search) shift; filter_search="$1"; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    # Build query string
+    local query=""
+
+    if [[ -n "$filter_board" ]]; then
+        board_id=$(resolve_board_alias "$filter_board")
+        query="${query}&board_ids[]=$board_id"
+    elif [[ -z "$filter_board" ]]; then
+        # Use default board if set
+        board_id=$(get_board)
+        if [[ -n "$board_id" ]]; then
+            query="${query}&board_ids[]=$board_id"
+        fi
+    fi
+
+    if [[ -n "$filter_assignee" ]]; then
+        if [[ "$filter_assignee" == "none" ]]; then
+            query="${query}&assignment_status=unassigned"
+        else
+            local assignee_id
+            assignee_id=$(resolve_user_alias "$filter_assignee")
+            query="${query}&assignee_ids[]=$assignee_id"
+        fi
+    fi
+
+    if [[ -n "$filter_status" ]]; then
+        case "$filter_status" in
+            triage) query="${query}&indexed_by=awaiting_triage" ;;
+            closed) query="${query}&indexed_by=closed" ;;
+            notnow|postponed) query="${query}&indexed_by=not_now" ;;
+            active) ;; # Default behavior
+            *) die "Unknown status: $filter_status (use: triage, active, closed, notnow)" ;;
+        esac
+    fi
+
+    if [[ -n "$filter_search" ]]; then
+        query="${query}&terms[]=$(printf '%s' "$filter_search" | jq -sRr @uri)"
+    fi
+
+    # Remove leading &
+    query="${query#&}"
+
+    local path="/$account/cards"
+    [[ -n "$query" ]] && path="$path?$query"
+
+    local cards
+    cards=$(api_get "$path")
+
+    # Check if we got any cards
+    local card_count
+    card_count=$(echo "$cards" | jq 'length')
+    if [[ "$card_count" -eq 0 ]]; then
+        echo "${DIM}No cards found${RESET}"
+        maybe_refresh_metadata
+        return
+    fi
+
+    # Sort cards by board, column, then by number descending
+    local sorted_cards
+    sorted_cards=$(echo "$cards" | jq 'sort_by(.board.name, (.column.name // "AAAA"), -.number)')
+
+    # Calculate max number width
+    local max_num
+    max_num=$(echo "$sorted_cards" | jq '[.[].number] | max // 1')
+    local max_num_width=${#max_num}
+    [[ $max_num_width -lt 4 ]] && max_num_width=4
+
+    # Group by board:column
+    local current_group=""
+
+    while read -r card; do
+        [[ -z "$card" || "$card" == "null" ]] && continue
+
+        local board_name column_name number title tags
+        board_name=$(echo "$card" | jq -r '.board.name // "Unknown"')
+        column_name=$(echo "$card" | jq -r '.column.name // "Triage"')
+        number=$(echo "$card" | jq -r '.number')
+        title=$(echo "$card" | jq -r '.title')
+        tags=$(echo "$card" | jq -c '.tags // []')
+
+        local group="$board_name: $column_name"
+
+        if [[ "$group" != "$current_group" ]]; then
+            if [[ -n "$current_group" ]]; then
+                print_separator
+            fi
+            printf "${BOLD}%s${RESET}\n\n" "$group"
+            current_group="$group"
+        fi
+
+        format_card "$number" "$title" "$tags" "$max_num_width"
+        echo
+    done < <(echo "$sorted_cards" | jq -c '.[]')
+
+    maybe_refresh_metadata
+}
+
+cmd_show() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz show <card#>"
+    fi
+
+    local card_number="$1"
+    local account
+    account=$(get_account)
+
+    local card
+    card=$(api_get "/$account/cards/$card_number")
+
+    local board_name column_name title description tags created_at
+    board_name=$(echo "$card" | jq -r '.board.name')
+    column_name=$(echo "$card" | jq -r '.column.name // "Triage"')
+    title=$(echo "$card" | jq -r '.title')
+    description=$(echo "$card" | jq -r '.description // ""')
+    tags=$(echo "$card" | jq -r '.tags // []')
+    created_at=$(echo "$card" | jq -r '.created_at')
+
+    echo "${BOLD}#$card_number: $title${RESET}"
+    echo "${DIM}$board_name: $column_name${RESET}"
+    echo
+
+    # Tags
+    if [[ "$tags" != "[]" ]]; then
+        local tag_str=""
+        while read -r tag; do
+            [[ -n "$tag" ]] && tag_str="$tag_str #$tag"
+        done < <(echo "$tags" | jq -r '.[]')
+        echo "${DIM}$tag_str${RESET}"
+        echo
+    fi
+
+    # Description
+    if [[ -n "$description" ]]; then
+        echo "$description"
+        echo
+    fi
+
+    # Assignees
+    local assignees
+    assignees=$(echo "$card" | jq -r '.assignees // []')
+    if [[ "$assignees" != "[]" ]]; then
+        echo "${DIM}Assigned to:${RESET}"
+        echo "$assignees" | jq -r '.[] | "  \(.name)"'
+        echo
+    fi
+
+    # Comments
+    local comments
+    comments=$(api_get "/$account/cards/$card_number/comments")
+
+    if [[ $(echo "$comments" | jq 'length') -gt 0 ]]; then
+        echo "${BOLD}Comments:${RESET}"
+        echo
+        while read -r comment; do
+            local creator_name body_text created_at
+            creator_name=$(echo "$comment" | jq -r '.creator.name')
+            body_text=$(echo "$comment" | jq -r '.body.plain_text')
+            created_at=$(echo "$comment" | jq -r '.created_at')
+
+            echo "${DIM}$creator_name ($created_at):${RESET}"
+            echo "$body_text"
+            echo
+        done < <(echo "$comments" | jq -c '.[]')
+    fi
+
+    maybe_refresh_metadata
+}
+
+cmd_add() {
+    require_jq
+
+    local board="" title="" description=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--description) shift; description="$1"; shift ;;
+            -*) die "Unknown option: $1" ;;
+            *)
+                if [[ -z "$title" ]]; then
+                    # Could be board or title
+                    if [[ -z "$(get_board)" ]]; then
+                        # No default board, first arg is board
+                        board="$1"
+                    else
+                        title="$1"
+                    fi
+                else
+                    # Already have something, this is title
+                    title="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # If board was set but title wasn't, swap them
+    if [[ -n "$board" && -z "$title" ]]; then
+        die "Usage: fz add [board] <title>"
+    fi
+
+    local account board_id
+    account=$(get_account)
+
+    if [[ -n "$board" ]]; then
+        board_id=$(resolve_board_alias "$board")
+    else
+        board_id=$(get_board)
+        [[ -z "$board_id" ]] && die "No board specified and no default board. Run: fz init"
+    fi
+
+    # Read description from stdin if not provided
+    if [[ -z "$description" ]] && [[ ! -t 0 ]]; then
+        description=$(cat)
+    fi
+
+    local data
+    data=$(jq -n --arg title "$title" --arg desc "$description" '{card: {title: $title, description: $desc}}')
+
+    local response
+    response=$(api_post "/$account/boards/$board_id/cards" "$data")
+
+    # Extract card number from Location header or response
+    echo "Created card"
+
+    maybe_refresh_metadata
+}
+
+cmd_move() {
+    require_jq
+
+    if [[ $# -lt 2 ]]; then
+        die "Usage: fz move <card#> <column>"
+    fi
+
+    local card_number="$1"
+    local column_input="$2"
+    local account
+    account=$(get_account)
+
+    local column_id
+    column_id=$(resolve_column_alias "$column_input")
+
+    local data
+    data=$(jq -n --arg col "$column_id" '{column_id: $col}')
+
+    api_post "/$account/cards/$card_number/triage" "$data" >/dev/null
+
+    echo "Moved #$card_number to column"
+
+    maybe_refresh_metadata
+}
+
+cmd_mb() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz mb <card#>"
+    fi
+
+    local card_number="$1"
+    local account
+    account=$(get_account)
+
+    api_delete "/$account/cards/$card_number/triage" >/dev/null 2>&1 || true
+
+    echo "Sent #$card_number back to triage"
+
+    maybe_refresh_metadata
+}
+
+cmd_nn() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz nn <card#>"
+    fi
+
+    local card_number="$1"
+    local account
+    account=$(get_account)
+
+    api_post "/$account/cards/$card_number/not_now" >/dev/null
+
+    echo "Moved #$card_number to Not Now"
+
+    maybe_refresh_metadata
+}
+
+cmd_close() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz close <card#>"
+    fi
+
+    local card_number="$1"
+    local account
+    account=$(get_account)
+
+    api_post "/$account/cards/$card_number/closure" >/dev/null
+
+    echo "Closed #$card_number"
+
+    maybe_refresh_metadata
+}
+
+cmd_open() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz open <card#>"
+    fi
+
+    local card_number="$1"
+    local account
+    account=$(get_account)
+
+    api_delete "/$account/cards/$card_number/closure" >/dev/null 2>&1 || true
+
+    echo "Reopened #$card_number"
+
+    maybe_refresh_metadata
+}
+
+cmd_comment() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz comment <card#> [text]"
+    fi
+
+    local card_number="$1"
+    shift
+
+    local body=""
+    if [[ $# -gt 0 ]]; then
+        body="$*"
+    elif [[ ! -t 0 ]]; then
+        body=$(cat)
+    else
+        die "Usage: fz comment <card#> [text] (or pipe text)"
+    fi
+
+    local account
+    account=$(get_account)
+
+    local data
+    data=$(jq -n --arg body "$body" '{comment: {body: $body}}')
+
+    api_post "/$account/cards/$card_number/comments" "$data" >/dev/null
+
+    echo "Added comment to #$card_number"
+
+    maybe_refresh_metadata
+}
+
+cmd_assign() {
+    require_jq
+
+    if [[ $# -lt 2 ]]; then
+        die "Usage: fz assign <card#> <user>"
+    fi
+
+    local card_number="$1"
+    local user_input="$2"
+    local account
+    account=$(get_account)
+
+    local user_id
+    user_id=$(resolve_user_alias "$user_input")
+
+    local data
+    data=$(jq -n --arg id "$user_id" '{assignee_id: $id}')
+
+    api_post "/$account/cards/$card_number/assignments" "$data" >/dev/null
+
+    echo "Toggled assignment on #$card_number"
+
+    maybe_refresh_metadata
+}
+
+cmd_tag() {
+    require_jq
+
+    if [[ $# -lt 2 ]]; then
+        die "Usage: fz tag <card#> <tag>"
+    fi
+
+    local card_number="$1"
+    local tag="$2"
+    # Strip leading # if present
+    tag="${tag#\#}"
+
+    local account
+    account=$(get_account)
+
+    local data
+    data=$(jq -n --arg tag "$tag" '{tag_title: $tag}')
+
+    api_post "/$account/cards/$card_number/taggings" "$data" >/dev/null
+
+    echo "Toggled tag #$tag on #$card_number"
+
+    maybe_refresh_metadata
+}
+
+cmd_board_alias() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz board --alias <name>"
+    fi
+
+    local alias_name="$1"
+
+    # Validate alias name
+    if is_number "$alias_name"; then
+        die "Alias cannot be a number"
+    fi
+    if is_reserved "$alias_name"; then
+        die "Alias '$alias_name' is a reserved word"
+    fi
+
+    local board_id
+    board_id=$(get_board)
+    [[ -z "$board_id" ]] && die "No default board. Run: fz init"
+
+    local config
+    config=$(get_local_config)
+    config=$(echo "$config" | jq --arg name "$alias_name" --arg id "$board_id" '.aliases.boards[$name] = $id')
+    save_local_config "$config"
+
+    echo "Board alias '$alias_name' created"
+}
+
+cmd_column_alias() {
+    require_jq
+
+    if [[ $# -lt 2 ]]; then
+        die "Usage: fz column --alias <name> <column>"
+    fi
+
+    local alias_name="$1"
+    local column_input="$2"
+
+    # Validate alias name
+    if is_number "$alias_name"; then
+        die "Alias cannot be a number"
+    fi
+    if is_reserved "$alias_name"; then
+        die "Alias '$alias_name' is a reserved word"
+    fi
+
+    local column_id
+    column_id=$(resolve_column_alias "$column_input")
+
+    local config
+    config=$(get_local_config)
+    config=$(echo "$config" | jq --arg name "$alias_name" --arg id "$column_id" '.aliases.columns[$name] = $id')
+    save_local_config "$config"
+
+    echo "Column alias '$alias_name' created"
+}
+
+cmd_user_alias() {
+    require_jq
+
+    if [[ $# -lt 2 ]]; then
+        die "Usage: fz user --alias <name> <user>"
+    fi
+
+    local alias_name="$1"
+    local user_input="$2"
+
+    # Validate alias name
+    if is_number "$alias_name"; then
+        die "Alias cannot be a number"
+    fi
+    if is_reserved "$alias_name"; then
+        die "Alias '$alias_name' is a reserved word"
+    fi
+
+    local user_id
+    user_id=$(resolve_user_alias "$user_input")
+
+    local config
+    config=$(get_local_config)
+    config=$(echo "$config" | jq --arg name "$alias_name" --arg id "$user_id" '.aliases.users[$name] = $id')
+    save_local_config "$config"
+
+    echo "User alias '$alias_name' created"
+}
+
+cmd_save() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz save <name> [filter options]"
+    fi
+
+    local filter_name="$1"
+    shift
+
+    # Validate filter name
+    if is_number "$filter_name"; then
+        die "Filter name cannot start with a number"
+    fi
+    if is_reserved "$filter_name"; then
+        die "Filter name '$filter_name' is a reserved word"
+    fi
+
+    # Parse filter options into JSON
+    local filter='{}'
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --board=*) filter=$(echo "$filter" | jq --arg v "${1#--board=}" '.board = $v'); shift ;;
+            --board) shift; filter=$(echo "$filter" | jq --arg v "$1" '.board = $v'); shift ;;
+            --tag=*) filter=$(echo "$filter" | jq --arg v "${1#--tag=}" '.tag = $v'); shift ;;
+            --tag) shift; filter=$(echo "$filter" | jq --arg v "$1" '.tag = $v'); shift ;;
+            --assignee=*) filter=$(echo "$filter" | jq --arg v "${1#--assignee=}" '.assignee = $v'); shift ;;
+            --assignee) shift; filter=$(echo "$filter" | jq --arg v "$1" '.assignee = $v'); shift ;;
+            --status=*) filter=$(echo "$filter" | jq --arg v "${1#--status=}" '.status = $v'); shift ;;
+            --status) shift; filter=$(echo "$filter" | jq --arg v "$1" '.status = $v'); shift ;;
+            --search=*) filter=$(echo "$filter" | jq --arg v "${1#--search=}" '.search = $v'); shift ;;
+            --search) shift; filter=$(echo "$filter" | jq --arg v "$1" '.search = $v'); shift ;;
+            *) die "Unknown filter option: $1" ;;
+        esac
+    done
+
+    local config
+    config=$(get_local_config)
+    config=$(echo "$config" | jq --arg name "$filter_name" --argjson filter "$filter" '.filters[$name] = $filter')
+    save_local_config "$config"
+
+    echo "Filter '$filter_name' saved"
+}
+
+run_saved_filter() {
+    require_jq
+
+    local filter_name="$1"
+    local config
+    config=$(get_local_config)
+
+    local filter
+    filter=$(echo "$config" | jq -r --arg name "$filter_name" '.filters[$name] // empty')
+
+    if [[ -z "$filter" ]]; then
+        die "Unknown command or filter: $filter_name"
+    fi
+
+    # Build args from filter
+    local args=()
+
+    local board tag assignee status search
+    board=$(echo "$filter" | jq -r '.board // empty')
+    tag=$(echo "$filter" | jq -r '.tag // empty')
+    assignee=$(echo "$filter" | jq -r '.assignee // empty')
+    status=$(echo "$filter" | jq -r '.status // empty')
+    search=$(echo "$filter" | jq -r '.search // empty')
+
+    [[ -n "$board" ]] && args+=("--board=$board")
+    [[ -n "$tag" ]] && args+=("--tag=$tag")
+    [[ -n "$assignee" ]] && args+=("--assignee=$assignee")
+    [[ -n "$status" ]] && args+=("--status=$status")
+    [[ -n "$search" ]] && args+=("--search=$search")
+
+    cmd_cards "${args[@]}"
+}
+
+cmd_help() {
+    cat << 'EOF'
+fz - fizzy kanban cli
+
+Setup:
+  fz login [token]           Set token globally (prompts if not provided)
+    --url=URL                  Override URL (default: https://fizzy.do)
+  fz init                    Tie directory to account/board
+    --token=TOKEN              Store token in .fz/config.json (repo-specific)
+    --url=URL                  Store URL in .fz/config.json
+  fz init --global           Set default account only
+
+Aliases:
+  fz board --alias <name>              Alias current board
+  fz column --alias <name> <column>    Alias a column
+  fz user --alias <name> <user>        Alias a user
+
+Saved filters:
+  fz save <name> [filter opts]    Save a query
+  fz <name>                       Run saved filter
+
+Cards:
+  fz                         List cards (default filter or active)
+  fz <number>                Show card
+  fz cards [options]         List cards with filters
+    --board=NAME               Filter by board
+    --tag=TAG                  Filter by tag
+    --assignee=NAME            Filter by assignee (or "me", "none")
+    --status=X                 triage|active|closed|notnow
+    --search=TERMS             Full-text search
+
+  fz show <card#>            Display card with comments
+  fz add [board] <title>     Create card
+    -d, --description          Inline description (or pipe stdin)
+
+Workflow:
+  fz move <card#> <column>   Triage into column
+  fz mb <card#>              Send to Maybe (aliases: maybe, triage)
+  fz nn <card#>              Send to Not Now (aliases: notnow, later)
+  fz close <card#>           Close card
+  fz open <card#>            Reopen card
+
+Collaboration:
+  fz comment <card#> [text]  Add comment (or pipe stdin)
+  fz assign <card#> <user>   Toggle assignment
+  fz tag <card#> <tag>       Toggle tag
+
+Info:
+  fz whoami                  Show identity/accounts
+  fz boards                  List boards
+  fz columns [board]         List columns
+  fz users                   List users
+  fz help                    Show this help
+  fz version                 Show version
+
+Config: ~/.config/fz/auth (token), .fz/config.json (project)
+EOF
+}
+
+cmd_version() {
+    echo "fz $VERSION"
+}
+
+#
+# Main dispatch
+#
+
+main() {
+    local cmd="${1:-}"
+
+    # No args = show cards (default filter)
+    if [[ -z "$cmd" ]]; then
+        cmd_cards
+        return
+    fi
+
+    # Number = show card
+    if is_number "$cmd"; then
+        cmd_show "$cmd"
+        return
+    fi
+
+    shift || true
+
+    case "$cmd" in
+        login) cmd_login "$@" ;;
+        init) cmd_init "$@" ;;
+        whoami) cmd_whoami "$@" ;;
+        boards) cmd_boards "$@" ;;
+        columns) cmd_columns "$@" ;;
+        users) cmd_users "$@" ;;
+        cards) cmd_cards "$@" ;;
+        show) cmd_show "$@" ;;
+        add) cmd_add "$@" ;;
+        move) cmd_move "$@" ;;
+        mb|maybe|triage) cmd_mb "$@" ;;
+        nn|notnow|later) cmd_nn "$@" ;;
+        close) cmd_close "$@" ;;
+        open) cmd_open "$@" ;;
+        comment) cmd_comment "$@" ;;
+        assign) cmd_assign "$@" ;;
+        tag) cmd_tag "$@" ;;
+        board)
+            if [[ "${1:-}" == "--alias" ]]; then
+                shift
+                cmd_board_alias "$@"
+            else
+                cmd_boards "$@"
+            fi
+            ;;
+        column)
+            if [[ "${1:-}" == "--alias" ]]; then
+                shift
+                cmd_column_alias "$@"
+            else
+                cmd_columns "$@"
+            fi
+            ;;
+        user)
+            if [[ "${1:-}" == "--alias" ]]; then
+                shift
+                cmd_user_alias "$@"
+            else
+                cmd_users "$@"
+            fi
+            ;;
+        save) cmd_save "$@" ;;
+        help|--help|-h) cmd_help ;;
+        version|--version|-v) cmd_version ;;
+        *)
+            # Try saved filter
+            run_saved_filter "$cmd"
+            ;;
+    esac
+}
+
+main "$@"
