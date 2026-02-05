@@ -11,9 +11,11 @@ if [[ -z "${NO_COLOR:-}" ]] && [[ -t 1 ]]; then
     BOLD='\033[1m'
     DIM='\033[2m'
     BRIGHT='\033[97m'
+    GREEN='\033[32m'
+    BLUE='\033[34m'
     RESET='\033[0m'
 else
-    BOLD='' DIM='' BRIGHT='' RESET=''
+    BOLD='' DIM='' BRIGHT='' GREEN='' BLUE='' RESET=''
 fi
 
 # Config paths
@@ -461,9 +463,22 @@ format_card() {
 
     local term_width
     term_width=$(tput cols 2>/dev/null || echo 80)
-    local title_width=$((term_width - max_num_width - 2))
     local indent
     indent=$(printf "%$((max_num_width + 1))s" "")
+
+    # Build tag string
+    local tag_str=""
+    if [[ -n "$tags" && "$tags" != "null" && "$tags" != "[]" ]]; then
+        while read -r tag; do
+            [[ -n "$tag" ]] && tag_str="$tag_str #$tag"
+        done < <(echo "$tags" | jq -r '.[]' 2>/dev/null || true)
+        tag_str="${tag_str# }"  # trim leading space
+    fi
+
+    # Calculate available width for title (account for tags if present)
+    local tag_suffix=""
+    [[ -n "$tag_str" ]] && tag_suffix=" -- $tag_str"
+    local title_width=$((term_width - max_num_width - 2 - ${#tag_suffix}))
 
     # Wrap the title
     local title_lines=()
@@ -471,26 +486,18 @@ format_card() {
         title_lines+=("$line")
     done < <(wrap_text "$title" "$title_width")
 
-    # First line: Number (right-aligned) + Title (bright)
-    printf "%${max_num_width}s ${BRIGHT}%s${RESET}\n" "$number" "${title_lines[0]:-}"
+    # First line: Number (green) + Title (bright) + Tags (dim)
+    if [[ -n "$tag_str" ]]; then
+        printf "${GREEN}%${max_num_width}s${RESET} ${BRIGHT}%s${RESET}${DIM} -- %s${RESET}\n" "$number" "${title_lines[0]:-}" "$tag_str"
+    else
+        printf "${GREEN}%${max_num_width}s${RESET} ${BRIGHT}%s${RESET}\n" "$number" "${title_lines[0]:-}"
+    fi
 
     # Continuation lines for title (indented)
     local i
     for ((i=1; i<${#title_lines[@]}; i++)); do
         printf "%s${BRIGHT}%s${RESET}\n" "$indent" "${title_lines[$i]}"
     done
-
-    # Tags (dim, flush with title)
-    if [[ -n "$tags" && "$tags" != "null" && "$tags" != "[]" ]]; then
-        local tag_str=""
-        while read -r tag; do
-            [[ -n "$tag" ]] && tag_str="$tag_str #$tag"
-        done < <(echo "$tags" | jq -r '.[]' 2>/dev/null || true)
-
-        if [[ -n "$tag_str" ]]; then
-            printf "%s${DIM}%s${RESET}\n" "$indent" "${tag_str# }"
-        fi
-    fi
 }
 
 # Print column separator
@@ -942,12 +949,11 @@ cmd_cards() {
             if [[ -n "$current_group" ]]; then
                 print_separator
             fi
-            printf "${BOLD}%s${RESET}\n\n" "$group"
+            printf "${BOLD}%s${RESET}: ${BLUE}%s${RESET}\n\n" "$board_name" "$column_name"
             current_group="$group"
         fi
 
         format_card "$number" "$title" "$tags" "$max_num_width"
-        echo
     done < <(echo "$sorted_cards" | jq -c '.[]')
 
     maybe_refresh_metadata
