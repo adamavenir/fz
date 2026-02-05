@@ -528,11 +528,6 @@ format_card() {
     done
 }
 
-# Print column separator
-print_separator() {
-    printf "\n${DIM}- - - -${RESET}\n\n"
-}
-
 #
 # Commands
 #
@@ -960,6 +955,8 @@ cmd_cards() {
 
     # Group by board:column
     local current_group=""
+    local indent
+    indent=$(printf "%$((max_num_width + 1))s" "")
 
     while read -r card; do
         [[ -z "$card" || "$card" == "null" ]] && continue
@@ -975,9 +972,9 @@ cmd_cards() {
 
         if [[ "$group" != "$current_group" ]]; then
             if [[ -n "$current_group" ]]; then
-                print_separator
+                echo
             fi
-            printf "${BOLD}%s${RESET}: ${BLUE}%s${RESET}\n\n" "$board_name" "$column_name"
+            printf "%s${DIM}${BLUE}%s${RESET}: ${BOLD}${BLUE}%s${RESET}\n" "$indent" "$board_name" "$column_name"
             current_group="$group"
         fi
 
