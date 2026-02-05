@@ -99,7 +99,7 @@ get_base_url() {
         url=$(jq -r '.url // empty' "$GLOBAL_CONFIG_FILE" 2>/dev/null || true)
     fi
     # Default to production
-    echo "${url:-https://fizzy.do}"
+    echo "${url:-https://app.fizzy.do}"
 }
 
 get_account() {
@@ -265,21 +265,40 @@ resolve_user_alias() {
 
 api_get() {
     local path="$1"
-    local token base_url
-    token=$(get_auth_token)
+    local token base_url response http_code
+    token=$(get_auth_token) || exit 1
     base_url=$(get_base_url)
 
-    curl -sS -f \
+    response=$(curl -sS -w '\n%{http_code}' \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/json" \
-        "${base_url}${path}"
+        "${base_url}${path}")
+
+    http_code=$(echo "$response" | tail -1)
+    response=$(echo "$response" | sed '$d')
+
+    if [[ "$http_code" -ge 400 ]]; then
+        case "$http_code" in
+            401) die "Unauthorized. Check your token or run: fz login" ;;
+            403) die "Forbidden. You don't have access to this resource" ;;
+            404) die "Not found: ${path}" ;;
+            *) die "API error ($http_code): ${response}" ;;
+        esac
+    fi
+
+    # Check if response looks like JSON
+    if [[ "$response" == "<"* ]]; then
+        die "API returned HTML instead of JSON. Check your URL: $base_url"
+    fi
+
+    echo "$response"
 }
 
 api_post() {
     local path="$1"
     local data="${2:-}"
     local token base_url
-    token=$(get_auth_token)
+    token=$(get_auth_token) || exit 1
     base_url=$(get_base_url)
 
     if [[ -n "$data" ]]; then
@@ -303,7 +322,7 @@ api_put() {
     local path="$1"
     local data="$2"
     local token base_url
-    token=$(get_auth_token)
+    token=$(get_auth_token) || exit 1
     base_url=$(get_base_url)
 
     curl -sS -f \
@@ -318,7 +337,7 @@ api_put() {
 api_delete() {
     local path="$1"
     local token base_url
-    token=$(get_auth_token)
+    token=$(get_auth_token) || exit 1
     base_url=$(get_base_url)
 
     curl -sS -f \
@@ -519,7 +538,7 @@ cmd_login() {
     fi
 
     # Use provided URL, env var, or default
-    url="${url:-${FIZZY_URL:-https://fizzy.do}}"
+    url="${url:-${FIZZY_URL:-https://app.fizzy.do}}"
 
     # Verify token works
     echo "Verifying token..."
@@ -536,7 +555,7 @@ cmd_login() {
     chmod 600 "$GLOBAL_AUTH_FILE"
 
     # Save URL to global config (only if non-default)
-    if [[ "$url" != "https://fizzy.do" ]]; then
+    if [[ "$url" != "https://app.fizzy.do" ]]; then
         if [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
             local config
             config=$(cat "$GLOBAL_CONFIG_FILE")
@@ -1403,7 +1422,7 @@ fz - fizzy kanban cli
 
 Setup:
   fz login [token]           Set token globally (prompts if not provided)
-    --url=URL                  Override URL (default: https://fizzy.do)
+    --url=URL                  Override URL (default: https://app.fizzy.do)
   fz init                    Tie directory to account/board
     --token=TOKEN              Store token in .fz/config.json (repo-specific)
     --url=URL                  Store URL in .fz/config.json
