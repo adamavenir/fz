@@ -8,11 +8,12 @@ A minimal CLI for [Fizzy](https://fizzy.do), the kanban tool by 37signals.
 brew install adamavenir/tap/fz
 ```
 
-Or clone and add to your PATH:
+Or clone and install:
 
 ```bash
 git clone https://github.com/adamavenir/fz.git
-ln -s "$(pwd)/fz/fz" /usr/local/bin/fz
+cd fz
+make install
 ```
 
 ## Setup
