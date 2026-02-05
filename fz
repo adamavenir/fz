@@ -48,7 +48,7 @@ get_local_config_file() {
 
 
 # Reserved words (can't be filter names)
-RESERVED_WORDS="cards show add edit move mb nn close open comment assign tag whoami boards cols columns col users login init save board user help maybe triage notnow later version"
+RESERVED_WORDS="cards show add edit mv move mb nn close open comment assign tag whoami boards cols columns col users login init save board user help maybe triage notnow later version"
 
 #
 # Utilities
@@ -1119,11 +1119,11 @@ cmd_add() {
     maybe_refresh_metadata
 }
 
-cmd_move() {
+cmd_mv() {
     require_jq
 
     if [[ $# -lt 2 ]]; then
-        die "Usage: fz move <card#> <column>"
+        die "Usage: fz mv <card#> <column>"
     fi
 
     local card_number="$1"
@@ -1531,7 +1531,7 @@ Cards:
     -d, --description          Inline description (or pipe stdin)
 
 Workflow:
-  fz move <card#> <column>   Triage into column
+  fz mv <card#> <column>     Triage into column
   fz mb <card#>              Send to Maybe (aliases: maybe, triage)
   fz nn <card#>              Send to Not Now (aliases: notnow, later)
   fz close <card#>           Close card
@@ -1618,7 +1618,7 @@ main() {
         cards) cmd_cards "$@" ;;
         show) cmd_show "$@" ;;
         add) cmd_add "$@" ;;
-        move) cmd_move "$@" ;;
+        mv|move) cmd_mv "$@" ;;
         mb|maybe|triage) cmd_mb "$@" ;;
         nn|notnow|later) cmd_nn "$@" ;;
         close) cmd_close "$@" ;;
