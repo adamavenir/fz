@@ -22,8 +22,30 @@ fi
 GLOBAL_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fz"
 GLOBAL_AUTH_FILE="$GLOBAL_CONFIG_DIR/auth"
 GLOBAL_CONFIG_FILE="$GLOBAL_CONFIG_DIR/config.json"
-LOCAL_CONFIG_DIR=".fz"
-LOCAL_CONFIG_FILE="$LOCAL_CONFIG_DIR/config.json"
+
+# Find local config by walking up parent directories
+find_local_config() {
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/.fz/config.json" ]]; then
+            echo "$dir/.fz/config.json"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+    return 1
+}
+
+# Get local config file path (found or default for creation)
+get_local_config_file() {
+    local found
+    if found=$(find_local_config); then
+        echo "$found"
+    else
+        echo "$PWD/.fz/config.json"
+    fi
+}
+
 
 # Reserved words (can't be filter names)
 RESERVED_WORDS="cards show add edit move mb nn close open comment assign tag whoami boards columns users login init save board column user help maybe triage notnow later version"
@@ -68,10 +90,11 @@ get_auth_token() {
         echo "$FZ_TOKEN_OVERRIDE"
         return
     fi
-    # Check local config (repo-specific)
-    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
+    # Check local config (repo-specific, searches parent dirs)
+    local local_config
+    if local_config=$(find_local_config); then
         local token
-        token=$(jq -r '.token // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+        token=$(jq -r '.token // empty' "$local_config" 2>/dev/null || true)
         if [[ -n "$token" ]]; then
             echo "$token"
             return
@@ -91,10 +114,10 @@ get_base_url() {
         echo "$FZ_URL_OVERRIDE"
         return
     fi
-    local url=""
-    # Check local config first
-    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
-        url=$(jq -r '.url // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+    local url="" local_config
+    # Check local config first (searches parent dirs)
+    if local_config=$(find_local_config); then
+        url=$(jq -r '.url // empty' "$local_config" 2>/dev/null || true)
     fi
     # Fall back to global config
     if [[ -z "$url" ]] && [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
@@ -105,10 +128,10 @@ get_base_url() {
 }
 
 get_account() {
-    local account=""
-    # Check local config first
-    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
-        account=$(jq -r '.account // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true)
+    local account="" local_config
+    # Check local config first (searches parent dirs)
+    if local_config=$(find_local_config); then
+        account=$(jq -r '.account // empty' "$local_config" 2>/dev/null || true)
     fi
     # Fall back to global config
     if [[ -z "$account" ]] && [[ -f "$GLOBAL_CONFIG_FILE" ]]; then
@@ -119,14 +142,16 @@ get_account() {
 }
 
 get_board() {
-    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
-        jq -r '.board // empty' "$LOCAL_CONFIG_FILE" 2>/dev/null || true
+    local local_config
+    if local_config=$(find_local_config); then
+        jq -r '.board // empty' "$local_config" 2>/dev/null || true
     fi
 }
 
 get_local_config() {
-    if [[ -f "$LOCAL_CONFIG_FILE" ]]; then
-        cat "$LOCAL_CONFIG_FILE"
+    local local_config
+    if local_config=$(find_local_config); then
+        cat "$local_config"
     else
         echo '{}'
     fi
@@ -134,8 +159,10 @@ get_local_config() {
 
 save_local_config() {
     local config="$1"
-    mkdir -p "$LOCAL_CONFIG_DIR"
-    echo "$config" > "$LOCAL_CONFIG_FILE"
+    local config_file
+    config_file=$(get_local_config_file)
+    mkdir -p "$(dirname "$config_file")"
+    echo "$config" > "$config_file"
 }
 
 #
@@ -382,10 +409,11 @@ should_refresh_metadata() {
 }
 
 refresh_metadata() {
-    [[ ! -f "$LOCAL_CONFIG_FILE" ]] && return 0
+    local local_config
+    local_config=$(find_local_config) || return 0
 
     local config account board_id
-    config=$(get_local_config)
+    config=$(cat "$local_config")
     account=$(jq -r '.account // empty' <<< "$config")
     board_id=$(jq -r '.board // empty' <<< "$config")
 
@@ -716,8 +744,8 @@ cmd_init() {
         config=$(echo "$config" | jq --arg url "$url" '.url = $url')
     fi
 
-    mkdir -p "$LOCAL_CONFIG_DIR"
-    echo "$config" > "$LOCAL_CONFIG_FILE"
+    mkdir -p ".fz"
+    echo "$config" > ".fz/config.json"
 
     echo
     echo "Initialized .fz/config.json"
@@ -1299,6 +1327,41 @@ cmd_board_alias() {
     echo "Board alias '$alias_name' created"
 }
 
+cmd_board_link() {
+    require_jq
+
+    if [[ $# -lt 1 ]]; then
+        die "Usage: fz board --link <board-name>"
+    fi
+
+    local board_input="$1"
+    local account
+    account=$(get_account)
+
+    # Resolve board (fuzzy match)
+    local board_id
+    board_id=$(resolve_board_alias "$board_input")
+
+    # Verify board exists by fetching it
+    local board
+    if ! board=$(api_get "/$account/boards/$board_id" 2>/dev/null); then
+        die "Board '$board_input' not found"
+    fi
+
+    local board_name
+    board_name=$(echo "$board" | jq -r '.name')
+
+    # Create or update local config
+    local config
+    config=$(get_local_config)
+    config=$(echo "$config" | jq --arg account "$account" --arg board "$board_id" '.account = $account | .board = $board')
+
+    mkdir -p ".fz"
+    echo "$config" > ".fz/config.json"
+
+    echo "Linked to board: $board_name"
+}
+
 cmd_column_alias() {
     require_jq
 
@@ -1441,10 +1504,8 @@ fz - fizzy kanban cli
 Setup:
   fz login [token]           Set token globally (prompts if not provided)
     --url=URL                  Override URL (default: https://app.fizzy.do)
-  fz init                    Tie directory to account/board
-    --token=TOKEN              Store token in .fz/config.json (repo-specific)
-    --url=URL                  Store URL in .fz/config.json
-  fz init --global           Set default account only
+  fz init                    Tie directory to account/board (interactive)
+  fz board --link <name>     Link current directory to a board
 
 Aliases:
   fz board --alias <name>              Alias current board
@@ -1488,9 +1549,38 @@ Info:
   fz users                   List users
   fz help                    Show this help
   fz version                 Show version
-
-Config: ~/.config/fz/auth (token), .fz/config.json (project)
 EOF
+
+    # Show boards or columns if logged in
+    if [[ -f "$GLOBAL_AUTH_FILE" ]] || find_local_config &>/dev/null; then
+        local board_id account
+        board_id=$(get_board 2>/dev/null || true)
+        account=$(get_account 2>/dev/null || true)
+
+        if [[ -n "$board_id" && -n "$account" ]]; then
+            # Has linked board - show columns
+            local columns
+            if columns=$(api_get "/$account/boards/$board_id/columns" 2>/dev/null); then
+                echo
+                printf "${DIM}Columns:${RESET}"
+                echo "$columns" | jq -r '.[].name' | while read -r name; do
+                    printf " %s" "$name"
+                done
+                echo
+            fi
+        elif [[ -n "$account" ]]; then
+            # Logged in but no linked board - show boards
+            local boards
+            if boards=$(api_get "/$account/boards" 2>/dev/null); then
+                echo
+                printf "${DIM}Boards:${RESET}"
+                echo "$boards" | jq -r '.[].name' | while read -r name; do
+                    printf " %s" "$name"
+                done
+                echo
+            fi
+        fi
+    fi
 }
 
 cmd_version() {
@@ -1540,6 +1630,9 @@ main() {
             if [[ "${1:-}" == "--alias" ]]; then
                 shift
                 cmd_board_alias "$@"
+            elif [[ "${1:-}" == "--link" ]]; then
+                shift
+                cmd_board_link "$@"
             else
                 cmd_boards "$@"
             fi
