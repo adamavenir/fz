@@ -953,6 +953,12 @@ cmd_cards() {
     local max_num_width=${#max_num}
     [[ $max_num_width -lt 4 ]] && max_num_width=4
 
+    # Check if multiple boards in results
+    local board_count
+    board_count=$(echo "$sorted_cards" | jq '[.[].board.id] | unique | length')
+    local multi_board=false
+    [[ "$board_count" -gt 1 ]] && multi_board=true
+
     # Group by board:column
     local current_group=""
     local indent
@@ -974,7 +980,11 @@ cmd_cards() {
             if [[ -n "$current_group" ]]; then
                 echo
             fi
-            printf "%s${DIM}${BLUE}%s${RESET}: ${BOLD}${BLUE}%s${RESET}\n" "$indent" "$board_name" "$column_name"
+            if $multi_board; then
+                printf "%s${BOLD}${BLUE}%s${RESET} ${DIM}(%s)${RESET}\n" "$indent" "$column_name" "$board_name"
+            else
+                printf "%s${BOLD}${BLUE}%s${RESET}\n" "$indent" "$column_name"
+            fi
             current_group="$group"
         fi
 
