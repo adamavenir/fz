@@ -22,15 +22,15 @@ make install
 # Login with your personal access token (from Profile → Personal access tokens)
 fz login
 
-# Initialize a project directory
+# Link a directory to a board
 cd your-project
-fz init
+fz board --link myboard
 ```
 
-For repo-specific config (e.g., local dev server):
+Or use the interactive setup:
 
 ```bash
-fz init --token=YOUR_TOKEN --url=http://fizzy.localhost:3006
+fz init
 ```
 
 ## Usage
@@ -49,7 +49,7 @@ fz show <card#>            Display card with comments
 fz add [board] <title>     Create card
   -d, --description          Inline description (or pipe stdin)
 
-fz move <card#> <column>   Triage into column
+fz mv <card#> <column>     Triage into column
 fz mb <card#>              Send to Maybe (aliases: maybe, triage)
 fz nn <card#>              Send to Not Now (aliases: notnow, later)
 fz close <card#>           Close card
@@ -61,7 +61,7 @@ fz tag <card#> <tag>       Toggle tag
 
 fz whoami                  Show identity/accounts
 fz boards                  List boards
-fz columns [board]         List columns
+fz cols [board]            List columns
 fz users                   List users
 ```
 
@@ -71,11 +71,11 @@ Create shortcuts for boards, columns, and users:
 
 ```bash
 fz board --alias f              # Alias current board as "f"
-fz column --alias ip "In Progress"
+fz col --alias ip "In Progress"
 fz user --alias k kevin
 
 # Then use them
-fz move 42 ip
+fz mv 42 ip
 fz assign 42 k
 ```
 
@@ -99,32 +99,30 @@ fz backlog
 - `~/.config/fz/auth` - token
 - `~/.config/fz/config.json` - url override, default account
 
-**Local** (per-project):
+**Local** (per-project, searches parent dirs):
 - `.fz/config.json` - account, board, token, url, aliases, filters, cached metadata
-
-Config lookup order:
-1. `.fz/config.json` (repo-specific)
-2. `~/.config/fz/*` (global)
-3. Default URL: `https://app.fizzy.do`
 
 ## Output
 
-Cards are grouped by `Board: Column` with colorized output:
+Cards grouped by column with colorized output:
 
 ```
-Fizzy: In Progress
+     Triage
+  76 Docs structure -- #docs #m
+  75 RLM in mlld
 
-   1 Title of card
-     #tag #othertag
+     In Progress
+  42 Some card -- #tag
+```
 
-1002 This is the title of this card
-     #sometag #mytag
+When viewing multiple boards, shows `Column (Board)`:
 
-- - - - - - - - - - - - - - - - - - - - - - - - - - - -
+```
+     Triage (mlld)
+  76 Docs structure
 
-Fizzy: Triage
-
-  42 New card in triage
+     Backlog (other-board)
+  42 Some card
 ```
 
 ## Requirements
